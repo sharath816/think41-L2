@@ -19,3 +19,6 @@ if __name__ == "__main__":
     load_csv_to_collection("products.csv", "products")
     load_csv_to_collection("orders.csv", "orders")
     load_csv_to_collection("users.csv", "users")
+    load_csv_to_collection("order_items.csv", "order_items")
+    load_csv_to_collection("inventory_items.csv", "inventory_items")
+    load_csv_to_collection("distribution_centers.csv", "distribution_centers")
