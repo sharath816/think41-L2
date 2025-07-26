@@ -1,81 +1,38 @@
-from datetime import datetime
+from fastapi import APIRouter, Request
+from models.chat import ChatRequest, ChatResponse
+from db.mongodb import get_database
 from bson import ObjectId
-from db.mongodb import get_collection
-from schemas.chat import ChatRequest
-import httpx
-import os
-from fastapi import HTTPException
+from services.groq import get_groq_response  # ✅ Import Groq service
 
-collection = get_collection()
+router = APIRouter()
+db = get_database()
 
-async def chat_with_bot(data: ChatRequest):
-    try:
-        # If conversation_id is provided, fetch it
-        if data.conversation_id:
-            try:
-                conversation = await collection.find_one({"_id": ObjectId(data.conversation_id)})
-                if not conversation:
-                    raise HTTPException(status_code=404, detail="Conversation not found")
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid conversation_id")
-        else:
-            # Otherwise create a new conversation
-            conversation = {
-                "user_id": data.user_id,
-                "messages": [],
-                "created_at": datetime.utcnow()
+@router.post("/api/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    # 1. Get Groq response
+    ai_response = await get_groq_response(request.message)
+
+    # 2. Create a conversation if new
+    conversation_id = request.conversation_id
+    if not conversation_id:
+        result = await db.conversations.insert_one({
+            "user_id": request.user_id,
+            "messages": []
+        })
+        conversation_id = str(result.inserted_id)
+
+    # 3. Update the conversation history
+    await db.conversations.update_one(
+        {"_id": ObjectId(conversation_id)},
+        {
+            "$push": {
+                "messages": {
+                    "user": request.message,
+                    "bot": ai_response
+                }
             }
-            result = await collection.insert_one(conversation)
-            conversation["_id"] = result.inserted_id
-
-        # Add user message to conversation
-        user_message = {
-            "role": "user",
-            "content": data.message,
-            "timestamp": datetime.utcnow()
         }
-        conversation["messages"].append(user_message)
+    )
 
-        # Query Groq LLM
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        headers = {"Authorization": f"Bearer {groq_api_key}"}
-        groq_url = "https://api.groq.com/openai/v1/chat/completions"
-
-        payload = {
-            "model": "llama3-8b-8192",
-            "messages": [
-                {"role": "system", "content": "You are a helpful customer support assistant."}
-            ] + [
-                {"role": m["role"], "content": m["content"]}
-                for m in conversation["messages"]
-            ],
-            "temperature": 0.7
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(groq_url, headers=headers, json=payload)
-            if response.status_code != 200:
-                raise HTTPException(status_code=500, detail="LLM error")
-            bot_reply = response.json()["choices"][0]["message"]["content"]
-
-        # Add bot reply
-        bot_message = {
-            "role": "assistant",
-            "content": bot_reply,
-            "timestamp": datetime.utcnow()
-        }
-        conversation["messages"].append(bot_message)
-
-        # Save updated conversation
-        await collection.update_one(
-            {"_id": conversation["_id"]},
-            {"$set": {"messages": conversation["messages"]}}
-        )
-
-        return {
-            "conversation_id": str(conversation["_id"]),
-            "response": bot_reply
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # 4. Return response
+    return ChatResponse(conversation_id=conversation_id, response=ai_response)
